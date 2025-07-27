@@ -1,3 +1,12 @@
 gradio
 requests
 gradio[oauth]
+langgraph
+transformers
+langchain
+langchain_community
+torch
+langchain-google-community
+load_dotenv
+openai
+langchain_experimental

@@ -3,21 +3,108 @@ import gradio as gr
 import requests
 import inspect
 import pandas as pd
+from langgraph.graph import StateGraph, END, START
+from typing import Dict, Any
+from langchain_community.chat_models import ChatOpenAI
+from langchain.agents import Tool
+from langchain.agents import initialize_agent
+from langchain.agents import AgentType
+from langchain_community.utilities.tavily_search import TavilySearchAPIWrapper
+from transformers import pipeline
+from langchain_experimental.utilities import PythonREPL
+from langchain_experimental.tools.python.tool import PythonREPLTool
 
-# (Keep Constants as is)
+import load_dotenv
+
+# Load environment variables
+load_dotenv.load_dotenv()
+
+# --- State Definition ---
+from typing import TypedDict
+class QuestionState(TypedDict, total=False):
+    question: str
+    answer: str
+    error: str
+
 # --- Constants ---
 DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
 
-# --- Basic Agent Definition ---
-# ----- THIS IS WERE YOU CAN BUILD WHAT YOU WANT ------
-class BasicAgent:
-    def __init__(self):
-        print("BasicAgent initialized.")
-    def __call__(self, question: str) -> str:
-        print(f"Agent received question (first 50 chars): {question[:50]}...")
-        fixed_answer = "This is a default answer."
-        print(f"Agent returning fixed answer: {fixed_answer}")
-        return fixed_answer
+# --- Tool Wrappers ---
+search = TavilySearchAPIWrapper(tavily_api_key=os.getenv("TAVILY_API_KEY"))
+audio_transcriber = pipeline("automatic-speech-recognition", model="openai/whisper-base")
+ocr = pipeline("image-to-text", model="Salesforce/blip-image-captioning-base")
+python_repl = PythonREPL()
+
+# --- Tool Wrappers ---
+def web_search_tool(q):
+    try:
+        results = search.results(query=q, include_answer=True)
+        if results and results[0].get("answer"):
+            return results[0]["answer"]
+        else:
+            return " ".join(r.get("content", "") for r in results[:2])
+    except Exception as e:
+        return f"Search error: {e}"
+
+def audio_tool_stub(audio):
+    try:
+        result = audio_transcriber(audio)
+        return result['text'] if 'text' in result else "No transcription available."
+    except Exception as e:
+        return f"Audio transcription error: {e}"
+    
+def ocr_tool_stub(image):
+    try:
+        result = ocr(image)
+        return result[0]['generated_text'] if result else "No text extracted."
+    except Exception as e:
+        return f"OCR error: {e}"
+    
+python_repl_tool = PythonREPLTool(
+    python_repl=python_repl,
+    return_direct=True,
+    descriptor="Executes Python code in a REPL environment for solving programming and math tasks."
+)
+
+# --- Tool-using LLM Agent ---
+tools = [
+    Tool(name="WebSearch", func=web_search_tool, description="Useful for answering questions using Wikipedia or current facts from the internet."),
+    Tool(name="AudioTranscribe", func=audio_tool_stub, description="Use for processing .mp3 or audio recordings for answers."),
+    Tool(name="OCR", func=ocr_tool_stub, description="Use to analyze text or chess boards in image input."),
+    Tool(name="ExcelProcessor", func=lambda f: pd.read_excel(f).to_csv(index=False), description="Reads and extracts data from an Excel file and returns as CSV text."),
+    python_repl_tool,
+]
+
+llm = ChatOpenAI(temperature=0, model_name="gpt-4")
+langchain_agent = initialize_agent(
+    tools,
+    llm,
+    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=True,
+    handle_parsing_errors=True,
+    max_iterations=10,
+    max_execution_time=300
+)
+
+# --- LangGraph Nodes ---
+def agent_node(state: QuestionState) -> Dict[str, Any]:
+    question = state.get("question")
+    if not question:
+        return {**state, "error": "No question provided"}
+
+    try:
+        result = langchain_agent.run(question)
+        return {**state, "answer": result}
+    except Exception as e:
+        return {**state, "answer": f"Agent error: {e}"}
+
+
+# --- LangGraph Compile ---
+graph = StateGraph(QuestionState)
+graph.add_node("agent", agent_node)
+graph.set_entry_point("agent")
+graph.add_edge("agent", END)
+agent_graph = graph.compile()
 
 def run_and_submit_all( profile: gr.OAuthProfile | None):
     """
@@ -37,16 +124,6 @@ def run_and_submit_all( profile: gr.OAuthProfile | None):
     api_url = DEFAULT_API_URL
     questions_url = f"{api_url}/questions"
     submit_url = f"{api_url}/submit"
-
-    # 1. Instantiate Agent ( modify this part to create your agent)
-    try:
-        agent = BasicAgent()
-    except Exception as e:
-        print(f"Error instantiating agent: {e}")
-        return f"Error initializing agent: {e}", None
-    # In the case of an app running as a hugging Face space, this link points toward your codebase ( usefull for others so please keep it public)
-    agent_code = f"https://huggingface.co/spaces/{space_id}/tree/main"
-    print(agent_code)
 
     # 2. Fetch Questions
     print(f"Fetching questions from: {questions_url}")
@@ -74,15 +151,20 @@ def run_and_submit_all( profile: gr.OAuthProfile | None):
     answers_payload = []
     print(f"Running agent on {len(questions_data)} questions...")
     for item in questions_data:
+        # Initialize state for each question
+        state: QuestionState = {"question": None}
+        
         task_id = item.get("task_id")
-        question_text = item.get("question")
-        if not task_id or question_text is None:
-            print(f"Skipping item with missing task_id or question: {item}")
-            continue
+        question = item.get("question")
         try:
-            submitted_answer = agent(question_text)
+            state = {"question": question}
+            result = agent_graph.invoke(state)
+            if result is None:
+                # Fallback to direct agent call
+                result = agent_node(state)
+            submitted_answer = result.get("answer", "ERROR")
             answers_payload.append({"task_id": task_id, "submitted_answer": submitted_answer})
-            results_log.append({"Task ID": task_id, "Question": question_text, "Submitted Answer": submitted_answer})
+            results_log.append({"Task ID": task_id, "Question": question, "Submitted Answer": submitted_answer})
         except Exception as e:
              print(f"Error running agent on task {task_id}: {e}")
              results_log.append({"Task ID": task_id, "Question": question_text, "Submitted Answer": f"AGENT ERROR: {e}"})
@@ -92,7 +174,11 @@ def run_and_submit_all( profile: gr.OAuthProfile | None):
         return "Agent did not produce any answers to submit.", pd.DataFrame(results_log)
 
     # 4. Prepare Submission 
-    submission_data = {"username": username.strip(), "agent_code": agent_code, "answers": answers_payload}
+    submission_data = {
+        "username": username.strip(),
+        "agent_code": f"https://huggingface.co/spaces/{space_id}/tree/main",
+        "answers": answers_payload
+    }
     status_update = f"Agent finished. Submitting {len(answers_payload)} answers for user '{username}'..."
     print(status_update)
 
