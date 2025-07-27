@@ -10,3 +10,4 @@ langchain-google-community
 load_dotenv
 openai
 langchain_experimental
+openpyxl
