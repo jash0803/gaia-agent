@@ -1,5 +1,5 @@
 ---
-title: Template Final Assignment
+title: GAIA-Langgraph
 emoji: 🕵🏻‍♂️
 colorFrom: indigo
 colorTo: indigo
