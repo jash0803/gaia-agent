@@ -1,16 +1,3 @@
----
-title: GAIA-Langgraph
-emoji: 🕵🏻‍♂️
-colorFrom: indigo
-colorTo: indigo
-sdk: gradio
-sdk_version: 5.25.2
-app_file: app.py
-pinned: false
-hf_oauth: true
-hf_oauth_expiration_minutes: 480
----
-
 # GAIA Multi-Agent Evaluation System
 
 A multi-agent system built with **LangGraph** and **LangChain** to tackle the [GAIA benchmark](https://huggingface.co/spaces/gaia-benchmark/leaderboard) — a set of real-world questions that test AI assistants on reasoning, tool use, and multimodal understanding.
